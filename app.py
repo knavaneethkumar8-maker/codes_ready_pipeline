@@ -119,7 +119,9 @@ def _make_cell_id(audio_id: str, grid_idx: int, cell_global_idx: int) -> str:
 def sl_infer_grid_json(wav_path: str, audio_id: Optional[str] = None) -> Dict[str, Any]:
     cfg, features, _, _, model, classes = sl_get()
 
-    audio_id = audio_id or os.path.basename(wav_path)
+    if not audio_id:
+        audio_id = os.path.basename(wav_path)
+
     x, sr = features.load_wav_mono(wav_path, cfg.SAMPLE_RATE)
     duration_ms = int(round(len(x) * 1000 / sr))
 
@@ -768,17 +770,16 @@ def api_sl_infer():
 
 @app.post("/runall")
 def api_runall():
-    """RUNALL: wav -> (swar boundary + swar_RL + shunya boundary + shunya_RL + SL) -> final grid JSON.
-
-    Accepts either:
-    - multipart: wav=@file
-    - json: {"wav_path":"...", "audio_id":"..."}
-    """
     tmp_wav = None
     try:
         body = request.get_json(silent=True) or {}
+
         wav_path = body.get("wav_path")
         audio_id = body.get("audio_id")
+
+        # ✅ ADD THIS: read from multipart form if JSON missing
+        if audio_id is None:
+            audio_id = request.form.get("audio_id")
 
         if not wav_path:
             tmp_wav = _save_upload("wav", ".wav")
@@ -788,27 +789,25 @@ def api_runall():
             return _err("Provide wav either as multipart upload or wav_path JSON")
 
         _require_file(wav_path)
+
         out = runall_json(wav_path, audio_id=audio_id)
 
-        # Ensure empty text remains "" and Devanagari characters are not escaped
         for g in out.get("grids", []):
-            tiers = g.get("tiers", {})
-            for tier in tiers.values():
+            for tier in g.get("tiers", {}).values():
                 for cell in tier.get("cells", []):
                     if cell.get("text") in [None, "None "]:
                         cell["text"] = ""
 
-        # Return proper JSON with UTF-8 characters
-        return Response(json.dumps(out, ensure_ascii=False), mimetype="application/json")
+        return Response(
+            json.dumps(out, ensure_ascii=False),
+            mimetype="application/json"
+        )
 
     except Exception as e:
         return _err("runall failed", 500, detail=str(e))
     finally:
         if tmp_wav and os.path.exists(tmp_wav):
-            try:
-                os.remove(tmp_wav)
-            except Exception:
-                pass
+            os.remove(tmp_wav)
 
 
 if __name__ == "__main__":
