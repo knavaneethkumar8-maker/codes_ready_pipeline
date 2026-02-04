@@ -1,0 +1,3 @@
+wav,frame_idx,correct_label
+./chunk_4Tanya/chunk_4.wav,16,1
+./chunk_4Tanya/chunk_4.wav,17,0
