@@ -151,6 +151,8 @@ def sl_infer_grid_json(wav_path: str, audio_id: Optional[str] = None) -> Dict[st
             _, probs = model(xb)
             p, idx = torch.max(probs[0], dim=0)
             text = classes[int(idx)]
+            if text in [None, "None"]:
+                text = ""  # <-- empty string for missing labels
             conf = float(p.item())
             jal_cells.append((text, conf, int(c_start), int(c_end)))
 
@@ -158,6 +160,7 @@ def sl_infer_grid_json(wav_path: str, audio_id: Optional[str] = None) -> Dict[st
 
         # akash (1 cell): highest confidence
         ak_text, ak_conf, _, _ = max(jal_cells, key=lambda t: t[1])
+        ak_text = ak_text if ak_text else ""
         tiers_out["akash"] = {
             "name": "आकाश",
             "index": 0,
@@ -169,7 +172,7 @@ def sl_infer_grid_json(wav_path: str, audio_id: Optional[str] = None) -> Dict[st
                     "index": 1,
                     "start_ms": g_start,
                     "end_ms": g_end,
-                    "text": ak_text + " ",
+                    "text": ak_text,
                     "conf": round(float(ak_conf), 4),
                     **DEFAULT_CELL,
                 }
@@ -181,6 +184,7 @@ def sl_infer_grid_json(wav_path: str, audio_id: Optional[str] = None) -> Dict[st
         for a in range(2):
             seg = jal_cells[a * 4 : (a + 1) * 4]
             t, c, _, _ = max(seg, key=lambda t: t[1])
+            t = t if t else ""
             st = g_start + a * 108
             en = min(st + 108, duration_ms)
             tiers_out["agni"]["cells"].append(
@@ -189,7 +193,7 @@ def sl_infer_grid_json(wav_path: str, audio_id: Optional[str] = None) -> Dict[st
                     "index": a + 1,
                     "start_ms": st,
                     "end_ms": en,
-                    "text": t + " ",
+                    "text": t,
                     "conf": round(float(c), 4),
                     **DEFAULT_CELL,
                 }
@@ -200,6 +204,7 @@ def sl_infer_grid_json(wav_path: str, audio_id: Optional[str] = None) -> Dict[st
         for v in range(4):
             seg = jal_cells[v * 2 : (v + 1) * 2]
             t, c, _, _ = max(seg, key=lambda t: t[1])
+            t = t if t else ""
             st = g_start + v * 54
             en = min(st + 54, duration_ms)
             tiers_out["vayu"]["cells"].append(
@@ -208,7 +213,7 @@ def sl_infer_grid_json(wav_path: str, audio_id: Optional[str] = None) -> Dict[st
                     "index": v + 1,
                     "start_ms": st,
                     "end_ms": en,
-                    "text": t + " ",
+                    "text": t,
                     "conf": round(float(c), 4),
                     **DEFAULT_CELL,
                 }
@@ -217,13 +222,14 @@ def sl_infer_grid_json(wav_path: str, audio_id: Optional[str] = None) -> Dict[st
         # jal (8 cells)
         tiers_out["jal"] = {"name": "जल", "index": 3, "start_ms": g_start, "end_ms": g_end, "cells": []}
         for j, (t, c, st, en) in enumerate(jal_cells, start=1):
+            t = t if t else ""
             tiers_out["jal"]["cells"].append(
                 {
                     "id": _make_cell_id(audio_id, g, 20 + j),
                     "index": j,
                     "start_ms": st,
                     "end_ms": en,
-                    "text": t + " ",
+                    "text": t,
                     "conf": round(float(c), 4),
                     **DEFAULT_CELL,
                 }
@@ -233,7 +239,7 @@ def sl_infer_grid_json(wav_path: str, audio_id: Optional[str] = None) -> Dict[st
         tiers_out["prithvi"] = {"name": "पृथ्वी", "index": 4, "start_ms": g_start, "end_ms": g_end, "cells": []}
         p_idx = 1
         for (t, c, st, en) in jal_cells:
-            _ = en
+            t = t if t else ""
             for k in range(prithvi_per_jal):
                 pst = st + k * 9
                 pen = min(pst + 9, duration_ms)
@@ -243,7 +249,7 @@ def sl_infer_grid_json(wav_path: str, audio_id: Optional[str] = None) -> Dict[st
                         "index": p_idx,
                         "start_ms": pst,
                         "end_ms": pen,
-                        "text": t + " ",
+                        "text": t,
                         "conf": round(float(c), 4),
                         **DEFAULT_CELL,
                     }
@@ -279,7 +285,7 @@ def sl_infer_grid_json(wav_path: str, audio_id: Optional[str] = None) -> Dict[st
 def sl_train_from_files(wav_path: str, tg_path: str, epochs: int = 6, batch: int = 64, lr: float = 1e-3) -> Dict[str, Any]:
     cfg, features, model_mod, tg, _, classes = sl_get()
 
-    # Build dataset like SL_akshar_pred/train_sl.py (tier 'जल' → class by first char)
+    # Load audio and TextGrid tiers
     x, sr = features.load_wav_mono(wav_path, cfg.SAMPLE_RATE)
     tiers = tg.parse_textgrid(tg_path)
     jal = tiers.get("जल", [])
@@ -289,21 +295,22 @@ def sl_train_from_files(wav_path: str, tg_path: str, epochs: int = 6, batch: int
     cls2i = {c: i for i, c in enumerate(classes)}
     X = []
     Y = []
+
     for xmin, xmax, mark in jal:
         lab = (mark or "").strip()
-        if lab == "":
-            lab = "None"
+        # Map empty or unknown labels to empty string
+        if lab == "" or lab[0] not in cls2i:
+            lab = ""
         else:
             lab = lab[0]
-            if lab not in cls2i:
-                lab = "None"
 
         s = int(float(xmin) * sr)
         e = int(float(xmax) * sr)
         seg = x[s:e]
         feats = features.mfcc_energy_zcr(seg, sr=sr, win_ms=20, hop_ms=5)
         X.append(torch.tensor(feats, dtype=torch.float32))
-        Y.append(int(cls2i[lab]))
+        # Map empty label to index 0 (safe fallback)
+        Y.append(int(cls2i.get(lab, 0)))
 
     if not X:
         raise RuntimeError("No samples built from TextGrid tier 'जल'.")
@@ -342,7 +349,12 @@ def sl_train_from_files(wav_path: str, tg_path: str, epochs: int = 6, batch: int
     _SL.clear()
     sl_get()
 
-    return {"samples": int(len(Y)), "epochs": int(epochs), "losses": [round(float(x), 6) for x in losses], "model_path": SL_MODEL_PATH}
+    return {
+        "samples": int(len(Y)),
+        "epochs": int(epochs),
+        "losses": [round(float(x), 6) for x in losses],
+        "model_path": SL_MODEL_PATH
+    }
 
 
 # ============================================================
