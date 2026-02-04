@@ -6,7 +6,7 @@ import tempfile
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
 
 import numpy as np
 import torch
@@ -765,6 +765,7 @@ def api_sl_infer():
                 pass
 
 
+
 @app.post("/runall")
 def api_runall():
     """RUNALL: wav -> (swar boundary + swar_RL + shunya boundary + shunya_RL + SL) -> final grid JSON.
@@ -788,7 +789,18 @@ def api_runall():
 
         _require_file(wav_path)
         out = runall_json(wav_path, audio_id=audio_id)
-        return jsonify(out)
+
+        # Ensure empty text remains "" and Devanagari characters are not escaped
+        for g in out.get("grids", []):
+            tiers = g.get("tiers", {})
+            for tier in tiers.values():
+                for cell in tier.get("cells", []):
+                    if cell.get("text") in [None, "None "]:
+                        cell["text"] = ""
+
+        # Return proper JSON with UTF-8 characters
+        return Response(json.dumps(out, ensure_ascii=False), mimetype="application/json")
+
     except Exception as e:
         return _err("runall failed", 500, detail=str(e))
     finally:
