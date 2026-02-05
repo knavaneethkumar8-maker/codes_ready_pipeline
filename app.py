@@ -51,6 +51,8 @@ def _save_upload(field: str, suffix: str) -> Optional[str]:
     f.save(p)
     return p
 
+def _make_cell_id(audio_id: str, grid_idx: int, cell_idx: int) -> str:
+    return f"{audio_id}_{grid_idx}_{cell_idx}"
 
 # ============================================================
 # SL (Supervised Learning) – grid JSON
@@ -126,7 +128,9 @@ def sl_infer_grid_json(wav_path: str, audio_id: Optional[str] = None) -> Dict[st
     duration_ms = int(round(len(x) * 1000 / sr))
 
     if not os.path.exists(SL_MODEL_PATH):
-        raise FileNotFoundError(f"Missing SL model: {SL_MODEL_PATH} (call /sl/train first)")
+        raise FileNotFoundError(
+            f"Missing SL model: {SL_MODEL_PATH} (call /sl/train first)"
+        )
 
     grid_ms = int(getattr(cfg, "GRID_MS", 216))
     total_grids = int(math.ceil(duration_ms / grid_ms))
@@ -136,33 +140,56 @@ def sl_infer_grid_json(wav_path: str, audio_id: Optional[str] = None) -> Dict[st
     prithvi_per_jal = 3
 
     grids = []
+
     for g in range(total_grids):
         g_start = g * grid_ms
         g_end = min((g + 1) * grid_ms, duration_ms)
 
-        # 1) jal predictions
+        # --------------------------------------------------
+        # JAL PREDICTIONS (8 × 27ms)
+        # --------------------------------------------------
         jal_cells = []  # (text, conf, start_ms, end_ms)
+
         for j in range(jal_per_grid):
             c_start = g_start + j * jal_ms
             c_end = min(c_start + jal_ms, duration_ms)
+
             s = int(c_start * sr / 1000)
             e = int(c_end * sr / 1000)
             seg = x[s:e]
-            feats = features.mfcc_energy_zcr(seg, sr=sr, win_ms=20, hop_ms=5)  # (T,15)
+
+            feats = features.mfcc_energy_zcr(
+                seg, sr=sr, win_ms=20, hop_ms=5
+            )  # (T, 15)
+
             xb = torch.tensor(feats, dtype=torch.float32).unsqueeze(0).to(DEVICE)
             _, probs = model(xb)
+
             p, idx = torch.max(probs[0], dim=0)
             text = classes[int(idx)]
             if text in [None, "None"]:
-                text = ""  # <-- empty string for missing labels
-            conf = float(p.item())
-            jal_cells.append((text, conf, int(c_start), int(c_end)))
+                text = ""
 
+            jal_cells.append(
+                (
+                    text,
+                    float(p.item()),
+                    int(c_start),
+                    int(c_end),
+                )
+            )
+
+        # ==================================================
+        # TIERS
+        # ==================================================
+        cell_idx = 1  # 🔑 GLOBAL cell index per grid
         tiers_out: Dict[str, Any] = {}
 
-        # akash (1 cell): highest confidence
+        # --------------------------------------------------
+        # AKASH (1 × 216ms)
+        # --------------------------------------------------
         ak_text, ak_conf, _, _ = max(jal_cells, key=lambda t: t[1])
-        ak_text = ak_text if ak_text else ""
+
         tiers_out["akash"] = {
             "name": "आकाश",
             "index": 0,
@@ -170,93 +197,133 @@ def sl_infer_grid_json(wav_path: str, audio_id: Optional[str] = None) -> Dict[st
             "end_ms": g_end,
             "cells": [
                 {
-                    "id": _make_cell_id(audio_id, g, 1),
-                    "index": 1,
+                    "id": _make_cell_id(audio_id, g, cell_idx),
+                    "index": cell_idx,
                     "start_ms": g_start,
                     "end_ms": g_end,
-                    "text": ak_text,
+                    "text": ak_text or "",
                     "conf": round(float(ak_conf), 4),
                     **DEFAULT_CELL,
                 }
             ],
         }
+        cell_idx += 1
 
-        # agni (2 cells): each aggregates 4 jal
-        tiers_out["agni"] = {"name": "अग्नि", "index": 1, "start_ms": g_start, "end_ms": g_end, "cells": []}
+        # --------------------------------------------------
+        # AGNI (2 × 108ms)
+        # --------------------------------------------------
+        tiers_out["agni"] = {
+            "name": "अग्नि",
+            "index": 1,
+            "start_ms": g_start,
+            "end_ms": g_end,
+            "cells": [],
+        }
+
         for a in range(2):
             seg = jal_cells[a * 4 : (a + 1) * 4]
             t, c, _, _ = max(seg, key=lambda t: t[1])
-            t = t if t else ""
+
             st = g_start + a * 108
             en = min(st + 108, duration_ms)
+
             tiers_out["agni"]["cells"].append(
                 {
-                    "id": _make_cell_id(audio_id, g, 1 + (a + 1)),
-                    "index": a + 1,
+                    "id": _make_cell_id(audio_id, g, cell_idx),
+                    "index": cell_idx,
                     "start_ms": st,
                     "end_ms": en,
-                    "text": t,
+                    "text": t or "",
                     "conf": round(float(c), 4),
                     **DEFAULT_CELL,
                 }
             )
+            cell_idx += 1
 
-        # vayu (4 cells): each aggregates 2 jal
-        tiers_out["vayu"] = {"name": "वायु", "index": 2, "start_ms": g_start, "end_ms": g_end, "cells": []}
+        # --------------------------------------------------
+        # VAYU (4 × 54ms)
+        # --------------------------------------------------
+        tiers_out["vayu"] = {
+            "name": "वायु",
+            "index": 2,
+            "start_ms": g_start,
+            "end_ms": g_end,
+            "cells": [],
+        }
+
         for v in range(4):
             seg = jal_cells[v * 2 : (v + 1) * 2]
             t, c, _, _ = max(seg, key=lambda t: t[1])
-            t = t if t else ""
+
             st = g_start + v * 54
             en = min(st + 54, duration_ms)
+
             tiers_out["vayu"]["cells"].append(
                 {
-                    "id": _make_cell_id(audio_id, g, 10 + v),
-                    "index": v + 1,
+                    "id": _make_cell_id(audio_id, g, cell_idx),
+                    "index": cell_idx,
                     "start_ms": st,
                     "end_ms": en,
-                    "text": t,
+                    "text": t or "",
                     "conf": round(float(c), 4),
                     **DEFAULT_CELL,
                 }
             )
+            cell_idx += 1
 
-        # jal (8 cells)
-        tiers_out["jal"] = {"name": "जल", "index": 3, "start_ms": g_start, "end_ms": g_end, "cells": []}
-        for j, (t, c, st, en) in enumerate(jal_cells, start=1):
-            t = t if t else ""
+        # --------------------------------------------------
+        # JAL (8 × 27ms)
+        # --------------------------------------------------
+        tiers_out["jal"] = {
+            "name": "जल",
+            "index": 3,
+            "start_ms": g_start,
+            "end_ms": g_end,
+            "cells": [],
+        }
+
+        for (t, c, st, en) in jal_cells:
             tiers_out["jal"]["cells"].append(
                 {
-                    "id": _make_cell_id(audio_id, g, 20 + j),
-                    "index": j,
+                    "id": _make_cell_id(audio_id, g, cell_idx),
+                    "index": cell_idx,
                     "start_ms": st,
                     "end_ms": en,
-                    "text": t,
+                    "text": t or "",
                     "conf": round(float(c), 4),
                     **DEFAULT_CELL,
                 }
             )
+            cell_idx += 1
 
-        # prithvi (24 cells): expand each jal into 3 x 9ms
-        tiers_out["prithvi"] = {"name": "पृथ्वी", "index": 4, "start_ms": g_start, "end_ms": g_end, "cells": []}
-        p_idx = 1
-        for (t, c, st, en) in jal_cells:
-            t = t if t else ""
+        # --------------------------------------------------
+        # PRITHVI (24 × 9ms)
+        # --------------------------------------------------
+        tiers_out["prithvi"] = {
+            "name": "पृथ्वी",
+            "index": 4,
+            "start_ms": g_start,
+            "end_ms": g_end,
+            "cells": [],
+        }
+
+        for (t, c, st, _) in jal_cells:
             for k in range(prithvi_per_jal):
                 pst = st + k * 9
                 pen = min(pst + 9, duration_ms)
+
                 tiers_out["prithvi"]["cells"].append(
                     {
-                        "id": _make_cell_id(audio_id, g, 40 + p_idx),
-                        "index": p_idx,
+                        "id": _make_cell_id(audio_id, g, cell_idx),
+                        "index": cell_idx,
                         "start_ms": pst,
                         "end_ms": pen,
-                        "text": t,
+                        "text": t or "",
                         "conf": round(float(c), 4),
                         **DEFAULT_CELL,
                     }
                 )
-                p_idx += 1
+                cell_idx += 1
 
         grids.append(
             {
@@ -277,7 +344,9 @@ def sl_infer_grid_json(wav_path: str, audio_id: Optional[str] = None) -> Dict[st
             "duration_ms": duration_ms,
             "grid_size_ms": grid_ms,
             "total_grids": total_grids,
-            "uploaded_at": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+            "uploaded_at": datetime.utcnow()
+            .isoformat(timespec="milliseconds")
+            + "Z",
             "status": "NEW",
         },
         "grids": grids,
